@@ -1,0 +1,6 @@
+streamlit
+fastembed
+faiss-cpu
+numpy
+ollama
+pypdf
