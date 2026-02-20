@@ -58,6 +58,7 @@ Everything runs locally and requires no external APIs.
 
 **Shell**
 ```streamlit run main-min.py```
+
 Then go to the URL printed in your terminal _(usually http://localhost:8501)_.
 
 ## Project Structure
@@ -127,12 +128,12 @@ Your workspace is now clean.
 
 Tune these in main-min.py:
 
-CHUNK_SIZE → adjust chunk length
-CHUNK_OVERLAP → control overlap
-TOP_K → number of retrieved chunks
-EMBED_MODEL → choose a different fastembed model
-Ollama model → switch from llama3:latest to others
-Add new PDF loaders or chunk strategies
+- CHUNK_SIZE → adjust chunk length
+- CHUNK_OVERLAP → control overlap
+- TOP_K → number of retrieved chunks
+- EMBED_MODEL → choose a different fastembed model
+- Ollama model → switch from llama3:latest to others
+- Add new PDF loaders or chunk strategies
 
 ## License
 
