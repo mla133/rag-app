@@ -1,3 +1,13 @@
+# ==========================
+# Minimal RAG app:
+# - pypdf for PDF text extraction
+# - custom sentence-aware text chunker
+# - fastembed for small, fast embeddings (no PyTorch)
+# - FAISS for vector similarity search
+# - Ollama for local LLM inference
+# - Streamlit UI
+# ==========================
+
 import os
 import re
 import tempfile
@@ -14,46 +24,57 @@ import ollama
 # ==========================
 # Configuration
 # ==========================
+# Embedding model name used by fastembed (384-dim output for bge-small-en-v1.5)
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"  # fastembed model (~384-dim)
+# File paths for FAISS index (vectors) and a pickle file (texts + metadata)
 INDEX_PATH = "./faiss_store.index"
-DOCS_PATH = "./faiss_docs.pkl"
+DOCS_PATH  = "./faiss_docs.pkl"
+# Chunking parameters: character-based size and overlap
 CHUNK_SIZE = 400
 CHUNK_OVERLAP = 100
+# How many most-similar passages to retrieve per query
 TOP_K = 5
 
 # ==========================
 # Lightweight Embeddings
 # ==========================
+# fastembed provides compact, no-PyTorch embeddings (greatly reducing size)
 from fastembed import TextEmbedding
 _embedder = TextEmbedding(model_name=EMBED_MODEL)
-_EMBED_DIM = 384  # bge-small-en-v1.5 output dimension
-
+_EMBED_DIM = 384  # bge-small-en-v1.5 output dimension (needed to shape the FAISS index)
 
 def embed_texts(texts: List[str]) -> List[np.ndarray]:
-    """Return list of L2-normalized float32 embedding vectors."""
+    """
+    Convert a list of strings into L2-normalized float32 embedding vectors.
+    Normalization lets us use FAISS IndexFlatIP (inner product) as cosine similarity.
+    """
     vecs = []
     for v in _embedder.embed(texts):
         v = np.asarray(v, dtype="float32")
-        # normalize for cosine similarity (inner product -> cosine)
+        # Normalize to unit length so inner product ≈ cosine similarity
         n = np.linalg.norm(v)
         vecs.append(v / (n if n else 1.0))
     return vecs
 
-
 # ==========================
 # Minimal "Document" struct
 # ==========================
+# A tiny stand-in for LangChain's Document: just text + metadata.
 @dataclass
 class Document:
     page_content: str
     metadata: Dict
 
-
 # ==========================
 # PDF → Text (pure pypdf)
 # ==========================
 def load_pdf(uploaded_file) -> List[Document]:
-    """Read a PDF with pypdf and return one Document per page (may be empty if no text)."""
+    """
+    Save the uploaded PDF to a temp file (Streamlit provides file-like objects),
+    extract text per page using pypdf, then clean up the temp file.
+    One Document is created per page (text can be empty).
+    """
+    # Write to a named temp file so PdfReader can open it
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.read())
         path = tmp.name
@@ -61,23 +82,32 @@ def load_pdf(uploaded_file) -> List[Document]:
     docs: List[Document] = []
     try:
         reader = PdfReader(path)
+        # Iterate pages and extract text
         for i, page in enumerate(reader.pages):
             text = page.extract_text() or ""
-            docs.append(Document(page_content=text, metadata={"page": i + 1, "source": uploaded_file.name}))
+            docs.append(
+                Document(
+                    page_content=text,
+                    metadata={"page": i + 1, "source": uploaded_file.name},
+                )
+            )
     finally:
+        # Always remove the temp file (even on errors)
         os.remove(path)
     return docs
-
 
 # ==========================
 # Tiny Text Splitter
 # ==========================
+# Split on sentence boundaries: punctuation . ? ! followed by whitespace.
 _SENTENCE_REGEX = re.compile(r"(?<=[\.\?\!])\s+")
 
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP) -> List[str]:
     """
-    Greedy sentence-based chunker with character-length control and simple overlap.
-    Keeps things pure-Python and dependency-free.
+    Greedy, sentence-aware chunker:
+    - Build a chunk by concatenating sentences until size would overflow.
+    - When flushing a chunk, carry 'chunk_overlap' trailing characters forward
+      to retain a bit of context continuity across adjacent chunks.
     """
     if not text:
         return []
@@ -91,23 +121,26 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, chunk_overlap: int = CHU
         if not s:
             continue
 
-        # If adding the sentence would exceed the chunk size, flush current.
+        # If adding s exceeds limit, finalize current chunk and start a new one
         if current and len(current) + 1 + len(s) > chunk_size:
             chunks.append(current)
-            # Overlap: carry last N chars from the previous chunk to the next
+            # Overlap: copy last N characters of the previous chunk into the next
             current = current[-chunk_overlap:] if chunk_overlap > 0 else ""
-            # If overlap starts with partial word, that's acceptable for minimalism.
 
+        # Append the sentence to the current chunk
         current = (current + " " + s).strip() if current else s
 
+    # Flush the final chunk
     if current:
         chunks.append(current)
 
     return chunks
 
-
 def split_documents(docs: List[Document]) -> List[Document]:
-    """Split page-level docs into chunk-level docs with inherited metadata."""
+    """
+    Apply chunking to each page-level document and produce chunk-level documents.
+    Metadata is inherited and augmented with a 'chunk' index.
+    """
     out: List[Document] = []
     for doc in docs:
         parts = chunk_text(doc.page_content)
@@ -117,130 +150,169 @@ def split_documents(docs: List[Document]) -> List[Document]:
             out.append(Document(page_content=p, metadata=meta))
     return out
 
-
 # ==========================
 # FAISS Index Persistence
 # ==========================
 def load_faiss_store() -> Tuple[faiss.Index, List[str], List[Dict]]:
-    """Load FAISS index + associated docs & metadata. Create new if missing."""
+    """
+    Load an existing FAISS index and the associated docs/metadata if present;
+    otherwise initialize a new, empty inner-product index compatible with cosine.
+    """
     if os.path.exists(INDEX_PATH) and os.path.exists(DOCS_PATH):
         index = faiss.read_index(INDEX_PATH)
         with open(DOCS_PATH, "rb") as f:
             docs, metadata = pickle.load(f)
         return index, docs, metadata
 
-    index = faiss.IndexFlatIP(_EMBED_DIM)  # inner product for cosine on normalized vectors
+    # New index: inner product over L2-normalized vectors ≈ cosine similarity
+    index = faiss.IndexFlatIP(_EMBED_DIM)
     return index, [], []
 
-
 def save_faiss_store(index: faiss.Index, docs: List[str], metadata: List[Dict]) -> None:
+    """Persist the FAISS index and the parallel lists of texts + metadata."""
     faiss.write_index(index, INDEX_PATH)
     with open(DOCS_PATH, "wb") as f:
         pickle.dump((docs, metadata), f)
 
-
 def add_to_index(chunks: List[Document]) -> None:
+    """
+    Embed the chunk texts, add them to the FAISS index, and persist:
+    - FAISS holds the vectors
+    - Pickle holds the raw texts and metadata aligned by row index
+    """
     index, docs, meta = load_faiss_store()
-    texts = [d.page_content for d in chunks]
-    vecs = embed_texts(texts)  # already normalized
 
-    # FAISS expects shape (n, d)
+    # Prepare data
+    texts = [d.page_content for d in chunks]
+    vecs = embed_texts(texts)  # vectors are already normalized
+
+    # Stack into shape (n, d) and add to FAISS
     mat = np.vstack(vecs)
     index.add(mat)
+
+    # Keep raw texts + metadata in parallel arrays (same order as FAISS rows)
     docs.extend(texts)
     meta.extend([d.metadata for d in chunks])
 
+    # Persist both index and sidecar data
     save_faiss_store(index, docs, meta)
 
-
 def search_index(query: str, k: int = TOP_K) -> Tuple[List[str], List[Dict], List[float]]:
+    """
+    Embed the query and run FAISS nearest-neighbor search to retrieve
+    the top-k most similar chunks. Return their texts, metadata, and scores.
+    """
     index, docs, meta = load_faiss_store()
     if index.ntotal == 0:
         return [], [], []
 
+    # Embed query and search
     q = embed_texts([query])[0].reshape(1, -1)
     scores, idx = index.search(q, k)
+
     indices = idx[0].tolist()
     sims = scores[0].tolist()
 
-    hits = []
-    metas = []
-    score_list = []
+    hits, metas, score_list = [], [], []
     for pos, i in enumerate(indices):
+        # Guard against invalid indices (shouldn't occur, but safe)
         if i < 0 or i >= len(docs):
             continue
         hits.append(docs[i])
         metas.append(meta[i])
         score_list.append(sims[pos])
-    return hits, metas, score_list
 
+    return hits, metas, score_list
 
 # ==========================
 # LLM (Ollama)
 # ==========================
+# A lightweight system prompt that constrains the LLM to the retrieved context.
 SYSTEM_PROMPT = """You are an AI assistant tasked with answering user questions using ONLY the provided context.
 If information is missing, clearly say so.
 """
 
 def call_llm(context: str, prompt: str):
+    """
+    Stream a response from the local Ollama model (llama3:latest),
+    feeding the concatenated retrieved context + user question.
+    Streamed chunks are yielded for real-time display in Streamlit.
+    """
     response = ollama.chat(
         model="llama3:latest",
         stream=True,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Context:\n{context}\n\nQuestion:\n{prompt}"},
+            {"role": "user",   "content": f"Context:\n{context}\n\nQuestion:\n{prompt}"},
         ],
     )
     for chunk in response:
         if not chunk.get("done", False):
+            # Yield partial text chunks to Streamlit for live rendering
             yield chunk["message"]["content"]
         else:
             break
-
 
 # ==========================
 # Streamlit App
 # ==========================
 def main():
+    """
+    Streamlit UI:
+    - Sidebar: upload and process PDF, clear the index
+    - Main panel: ask questions, display LLM answer, show retrieved sources
+    """
     st.set_page_config(page_title="Minimal RAG (pypdf + fastembed + FAISS)")
     st.title("📄 Minimal RAG Q&A")
 
+    # ---- Sidebar workflow: ingest / clear ----
     with st.sidebar:
         uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
+
+        # Ingest button: extract -> chunk -> embed -> index
         if st.button("Process PDF") and uploaded:
-            # Page-level extraction
-            pages = load_pdf(uploaded)
-            # Chunk to smaller passages
-            chunks = split_documents(pages)
-            # Add to FAISS
-            add_to_index(chunks)
+            pages  = load_pdf(uploaded)          # page-level docs
+            chunks = split_documents(pages)      # chunk-level docs
+            add_to_index(chunks)                 # add to FAISS + persist
             st.success(f"Indexed {len(chunks)} chunks from “{uploaded.name}”")
 
+        # Maintenance: clear both the vector index and the metadata store
         if st.button("Clear Index"):
             for p in [INDEX_PATH, DOCS_PATH]:
                 if os.path.exists(p):
                     os.remove(p)
             st.warning("Cleared FAISS index and document store.")
 
+    # ---- Main panel: querying / answering ----
     prompt = st.text_area("Ask a question about your uploaded documents:")
+
     if st.button("Ask") and prompt:
+        # Retrieve top-k relevant chunks for the query
         hits, metas, sims = search_index(prompt, k=TOP_K)
         if not hits:
             st.info("No documents indexed yet. Upload and process a PDF first.")
             return
 
+        # Join retrieved chunks into a single context block for the LLM
         context = "\n\n".join(hits)
+
+        # Stream the model's answer
         st.subheader("Answer")
         st.write_stream(call_llm(context=context, prompt=prompt))
 
+        # Show sources with similarity scores
         with st.expander("Retrieved Chunks"):
             for i, (txt, m, s) in enumerate(zip(hits, metas, sims), start=1):
                 st.markdown(
-                    f"**Result {i}**  |  Score: `{s:.3f}`  |  Source: `{m.get('source','?')}`  |  Page: `{m.get('page','?')}`  |  Chunk: `{m.get('chunk','?')}`"
+                    f"**Result {i}**  "
+                    f"Score: `{s:.3f}`  "
+                    f"Source: `{m.get('source','?')}`  "
+                    f"Page: `{m.get('page','?')}`  "
+                    f"Chunk: `{m.get('chunk','?')}`"
                 )
                 st.write(txt)
                 st.markdown("---")
 
-
+# Standard Python entrypoint: works regardless of filename when run directly
 if __name__ == "__main__":
     main()
