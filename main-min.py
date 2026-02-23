@@ -338,6 +338,26 @@ def search_index(query: str, k: int = TOP_K) -> Tuple[List[str], List[Dict], Lis
 
     return hits, metas, score_list
 
+def list_indexed_sources():
+    """Return a sorted list of unique source filenames that have been indexed."""
+    if not os.path.exists(DOCS_PATH):
+        return []
+
+    with open(DOCS_PATH, "rb") as f:
+        docs, meta = pickle.load(f)
+
+    sources = {m.get("source", "unknown") for m in meta}
+    return sorted(sources)
+
+def list_full_metadata():
+    if not os.path.exists(DOCS_PATH):
+        return []
+    
+    with open(DOCS_PATH, "rb") as f:
+        docs, meta = pickle.load(f)
+
+    return meta
+
 # ==========================
 # LLM (Ollama)
 # ==========================
@@ -400,26 +420,6 @@ def main():
             # For detailed message display
             status_area = st.empty()
 
-#            def process_single_file(uploaded):
-#                """Process one file in parallel"""
-#                name = uploaded.name.lower()
-#
-#                # Load file based on extension
-#                if name.endswith(".pdf"):
-#                    pages = load_pdf(uploaded)
-#                elif name.endswith(".txt") or name.endswith(".md"):
-#                    pages = load_txtlike(uploaded)
-#                elif name.endswith(".py"):
-#                    pages = load_py_structured(uploaded)
-#                else:
-#                    st.warning("Unsupported filetype: {uploaded.name}")
-#                    return 0, uploaded.name, "Unsupported Type"
-#
-#                # Chunk/Embed/Index
-#                chunks = split_documents(pages)      # chunk-level docs
-#                add_to_index(chunks)                 # add to FAISS + persist
-#
-#                return len(chunks), uploaded.name, "OK"
             def process_single_file(filename: str, mime: str, file_bytes: bytes):
                 """
                 Process a single file safely inside a worker thread.
@@ -454,8 +454,6 @@ def main():
                 return len(chunks), filename, "OK"
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                #futures = {executor.submit(process_single_file, f): f for f in uploaded_files}
-
                 file_blobs = [
                         (f.name, f.type, f.read())  #snapshot bytes now
                         for f in uploaded_files
@@ -482,6 +480,19 @@ def main():
                     total_chunks += chunks_added
 
             st.success(f"Processed {processed_files} file(s) with {total_chunks} total chunks!")
+
+        # Show documents loaded into the vector index
+        if st.button("Show Indexed Docs"):
+            sources = list_indexed_sources()
+            if sources:
+                st.write("### Indexed files:")
+                for src in sources:
+                    st.write(f"- {src}")
+            else:
+                st.write("No indexed files.")
+
+        with st.expander("Full Metadata Dump"):
+            st.json(list_full_metadata())
 
         # Maintenance: clear both the vector index and the metadata store
         if st.button("Clear Index"):
