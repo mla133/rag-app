@@ -67,6 +67,7 @@ class Document:
 
 # ==========================
 # PDF → Text (pure pypdf)
+# Other document loaders fall under here also
 # ==========================
 def load_pdf(uploaded_file) -> List[Document]:
     """
@@ -103,6 +104,111 @@ def load_txtlike(uploaded_file) -> List[Document]:
     text = uploaded_file.read().decode("utf-8", errors="ignore")
     return [Document(page_content=text, metadata={"page": 1, "source": uploaded_file.name})]
 
+
+def load_py_structured(uploaded_file) -> List[Document]:
+    import ast
+    """
+    Parses a .py file into structured Documents:
+    - module docstring
+    - each function definition
+    - each class and its methods
+    """
+    raw = uploaded_file.read().decode("utf-8", errors="ignore")
+    tree = ast.parse(raw)
+
+    docs = []
+
+    # Add the module-level docstring if present
+    module_doc = ast.get_docstring(tree)
+    if module_doc:
+        docs.append(Document(
+            page_content=module_doc,
+            metadata={"type": "module_doc", "source": uploaded_file.name}
+        ))
+
+    # Iterate over AST nodes
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            docs.append(Document(
+                page_content=ast.get_docstring(node) or "",
+                metadata={
+                    "type": "function",
+                    "name": node.name,
+                    "source": uploaded_file.name
+                }
+            ))
+
+        if isinstance(node, ast.ClassDef):
+            # Class docstring
+            class_doc = ast.get_docstring(node) or ""
+            docs.append(Document(
+                page_content=class_doc,
+                metadata={
+                    "type": "class",
+                    "name": node.name,
+                    "source": uploaded_file.name
+                }
+            ))
+
+            # Also extract docstrings from class methods
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef):
+                    docs.append(Document(
+                        page_content=ast.get_docstring(item) or "",
+                        metadata={
+                            "type": "method",
+                            "class": node.name,
+                            "name": item.name,
+                            "source": uploaded_file.name
+                        }
+                    ))
+
+    # Fallback: if nothing extracted, treat entire file as text
+    if not docs:
+        docs = [Document(page_content=raw, metadata={"source": uploaded_file.name})]
+
+    return docs
+
+# ==========================
+# Modified loader functions
+# to accept raw bytes
+# ==========================
+def load_pdf_bytes(name, blob):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(blob)
+        path = tmp.name
+    try:
+        reader = PdfReader(path)
+        docs = [
+            Document(page_content=(page.extract_text() or ""), metadata={"page": i+1, "source": name})
+            for i, page in enumerate(reader.pages)
+        ]
+    finally:
+        os.remove(path)
+    return docs
+
+
+def load_txt_bytes(name, blob):
+    text = blob.decode("utf-8", errors="ignore")
+    return [Document(page_content=text, metadata={"page": 1, "source": name})]
+
+
+def load_md_bytes(name, blob):
+    text = blob.decode("utf-8", errors="ignore")
+    return [Document(page_content=text, metadata={"page": 1, "source": name})]
+
+
+def load_html_bytes(name, blob):
+    raw = blob.decode("utf-8", errors="ignore")
+    parser = MinimalHTMLTextExtractor()
+    parser.feed(raw)
+    text = parser.get_text()
+    return [Document(page_content=text, metadata={"page": 1, "source": name})]
+
+
+def load_py_bytes(name, blob):
+    text = blob.decode("utf-8", errors="ignore")
+    return [Document(page_content=text, metadata={"page": 1, "source": name})]
 
 # ==========================
 # Tiny Text Splitter
@@ -277,7 +383,7 @@ def main():
     with st.sidebar:
         uploaded_files = st.file_uploader(
                 "Upload a PDF/TXT/MD file.", 
-                type=["pdf", "txt", "md"], 
+                type=["pdf", "txt", "md", "py"], 
                 accept_multiple_files=True
                 )
         import concurrent.futures
@@ -294,27 +400,72 @@ def main():
             # For detailed message display
             status_area = st.empty()
 
-            def process_single_file(uploaded):
-                """Process one file in parallel"""
-                name = uploaded.name.lower()
+#            def process_single_file(uploaded):
+#                """Process one file in parallel"""
+#                name = uploaded.name.lower()
+#
+#                # Load file based on extension
+#                if name.endswith(".pdf"):
+#                    pages = load_pdf(uploaded)
+#                elif name.endswith(".txt") or name.endswith(".md"):
+#                    pages = load_txtlike(uploaded)
+#                elif name.endswith(".py"):
+#                    pages = load_py_structured(uploaded)
+#                else:
+#                    st.warning("Unsupported filetype: {uploaded.name}")
+#                    return 0, uploaded.name, "Unsupported Type"
+#
+#                # Chunk/Embed/Index
+#                chunks = split_documents(pages)      # chunk-level docs
+#                add_to_index(chunks)                 # add to FAISS + persist
+#
+#                return len(chunks), uploaded.name, "OK"
+            def process_single_file(filename: str, mime: str, file_bytes: bytes):
+                """
+                Process a single file safely inside a worker thread.
+                Accepts raw bytes instead of UploadedFile objects.
+                """
+                name = filename.lower()
 
-                # Load file based on extension
+                # ROUTE TO CORRECT LOADER (from raw bytes now)
                 if name.endswith(".pdf"):
-                    pages = load_pdf(uploaded)
-                elif name.endswith(".txt") or name.endswith(".md"):
-                    pages = load_txtlike(uploaded)
+                    pages = load_pdf_bytes(filename, file_bytes)
+                elif name.endswith(".txt"):
+                    pages = load_txt_bytes(filename, file_bytes)
+                elif name.endswith(".md"):
+                    pages = load_md_bytes(filename, file_bytes)
+                elif name.endswith(".html"):
+                    pages = load_html_bytes(filename, file_bytes)
+                elif name.endswith(".py"):
+                    pages = load_py_bytes(filename, file_bytes)
                 else:
-                    st.warning("Unsupported filetype: {uploaded.name}")
-                    return 0, uploaded.name, "Unsupported Type"
+                    return 0, filename, "Unsupported type"
 
-                # Chunk/Embed/Index
-                chunks = split_documents(pages)      # chunk-level docs
-                add_to_index(chunks)                 # add to FAISS + persist
+                # Chunk
+                chunks = split_documents(pages)
 
-                return len(chunks), uploaded.name, "OK"
+                # Guard for empty results
+                if not chunks:
+                    return 0, filename, "No chunks"
+
+                # Index
+                add_to_index(chunks)
+
+                return len(chunks), filename, "OK"
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                futures = {executor.submit(process_single_file, f): f for f in uploaded_files}
+                #futures = {executor.submit(process_single_file, f): f for f in uploaded_files}
+
+                file_blobs = [
+                        (f.name, f.type, f.read())  #snapshot bytes now
+                        for f in uploaded_files
+                        ]
+
+                futures = {
+                        executor.submit(process_single_file, name, mime, blob): name
+                        for name, mime, blob in file_blobs
+                        }
+
 
                 total_chunks = 0
 
