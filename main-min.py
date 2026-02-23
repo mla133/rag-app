@@ -21,6 +21,11 @@ import streamlit as st
 from pypdf import PdfReader
 import ollama
 
+# --- Added in for ZIPFILE support ---
+import io
+import zipfile
+from collections import defaultdict
+
 # ==========================
 # Configuration
 # ==========================
@@ -358,6 +363,17 @@ def list_full_metadata():
 
     return meta
 
+def load_indexed_data():
+    """Load all raw text and metadata from the FAISS sidecar file."""
+    if not os.path.exists(DOCS_PATH):
+        return [], []
+
+    with open(DOCS_PATH, "rb") as f:
+        docs, meta = pickle.load(f)
+
+    return docs, meta
+
+
 # ==========================
 # LLM (Ollama)
 # ==========================
@@ -482,7 +498,8 @@ def main():
             st.success(f"Processed {processed_files} file(s) with {total_chunks} total chunks!")
 
         # Show documents loaded into the vector index
-        if st.button("Show Indexed Docs"):
+        #if st.button("Show Indexed Docs"):
+        with st.expander("Show Indexed Docs"):
             sources = list_indexed_sources()
             if sources:
                 st.write("### Indexed files:")
@@ -493,6 +510,34 @@ def main():
 
         with st.expander("Full Metadata Dump"):
             st.json(list_full_metadata())
+
+
+        # Export indexed documents into a ZIP file
+        with st.sidebar.expander("Export as ZIP"):
+            docs, meta = load_indexed_data()
+
+            if not docs:
+                st.info("No indexed documents to export.")
+            else:
+                # Group chunks by source filename
+                grouped = defaultdict(list)
+                for text, m in zip(docs, meta):
+                    grouped[m.get("source", "unknown")].append(text)
+
+                buffer = io.BytesIO()
+
+                with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for source, parts in grouped.items():
+                        combined = "\n\n".join(parts)
+                        safe_name = f"{source}.txt"
+                        zf.writestr(safe_name, combined)
+
+                st.download_button(
+                    label="Download ZIP Archive",
+                    data=buffer.getvalue(),
+                    file_name="rag_index_export.zip",
+                    mime="application/zip"
+                )
 
         # Maintenance: clear both the vector index and the metadata store
         if st.button("Clear Index"):
