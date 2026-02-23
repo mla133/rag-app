@@ -96,6 +96,14 @@ def load_pdf(uploaded_file) -> List[Document]:
         os.remove(path)
     return docs
 
+def load_txtlike(uploaded_file) -> List[Document]:
+    """
+    Load a .txt or .md file as a single Document.
+    """
+    text = uploaded_file.read().decode("utf-8", errors="ignore")
+    return [Document(page_content=text, metadata={"page": 1, "source": uploaded_file.name})]
+
+
 # ==========================
 # Tiny Text Splitter
 # ==========================
@@ -267,14 +275,62 @@ def main():
 
     # ---- Sidebar workflow: ingest / clear ----
     with st.sidebar:
-        uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
+        uploaded_files = st.file_uploader(
+                "Upload a PDF/TXT/MD file.", 
+                type=["pdf", "txt", "md"], 
+                accept_multiple_files=True
+                )
+        import concurrent.futures
 
         # Ingest button: extract -> chunk -> embed -> index
-        if st.button("Process PDF") and uploaded:
-            pages  = load_pdf(uploaded)          # page-level docs
-            chunks = split_documents(pages)      # chunk-level docs
-            add_to_index(chunks)                 # add to FAISS + persist
-            st.success(f"Indexed {len(chunks)} chunks from “{uploaded.name}”")
+        if st.button("Process Files") and uploaded_files:
+            st.write("Starting processing...")
+            
+            # Main progress bar across all files
+            main_progress = st.progress(0, text="Overall Progress")
+            total_files = len(uploaded_files)
+            processed_files = 0
+
+            # For detailed message display
+            status_area = st.empty()
+
+            def process_single_file(uploaded):
+                """Process one file in parallel"""
+                name = uploaded.name.lower()
+
+                # Load file based on extension
+                if name.endswith(".pdf"):
+                    pages = load_pdf(uploaded)
+                elif name.endswith(".txt") or name.endswith(".md"):
+                    pages = load_txtlike(uploaded)
+                else:
+                    st.warning("Unsupported filetype: {uploaded.name}")
+                    return 0, uploaded.name, "Unsupported Type"
+
+                # Chunk/Embed/Index
+                chunks = split_documents(pages)      # chunk-level docs
+                add_to_index(chunks)                 # add to FAISS + persist
+
+                return len(chunks), uploaded.name, "OK"
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                futures = {executor.submit(process_single_file, f): f for f in uploaded_files}
+
+                total_chunks = 0
+
+                for future in concurrent.futures.as_completed(futures):
+                    chunks_added, filename, status = future.result()
+
+                    processed_files += 1
+                    main_progress.progress(processed_files / total_files)
+
+                    status_area.write(
+                            f"Processed **{filename}** - {chunks_added} chunks ({status})"
+                            )
+
+                    total_chunks += chunks_added
+
+            st.success(f"Processed {processed_files} file(s) with {total_chunks} total chunks!")
 
         # Maintenance: clear both the vector index and the metadata store
         if st.button("Clear Index"):
@@ -290,7 +346,7 @@ def main():
         # Retrieve top-k relevant chunks for the query
         hits, metas, sims = search_index(prompt, k=TOP_K)
         if not hits:
-            st.info("No documents indexed yet. Upload and process a PDF first.")
+            st.info("No documents indexed yet. Upload and process a PDF/TXT/MD file first.")
             return
 
         # Join retrieved chunks into a single context block for the LLM
