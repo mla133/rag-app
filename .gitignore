@@ -4,3 +4,4 @@
 demo-rag-chroma/
 faiss_docs.pkl
 faiss_store.index
+__pycache__*
