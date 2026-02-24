@@ -2,6 +2,7 @@
 # Global configuration for RAG system
 # ======================================================================
 
+OLLAMA_MODEL = "llama3.2:1b"
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 EMBED_DIM = 384
 

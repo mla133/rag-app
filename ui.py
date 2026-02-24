@@ -89,7 +89,7 @@ def render_ui():
 
     # Query panel
     st.header("Ask a Question")
-    prompt = st.text_area("Query:", placeholder="e.g., Where is load_config defined?")
+    prompt = st.text_area("Query:", placeholder="e.g., Describe this project and give some examples for usage.")
 
     with st.expander("Filters"):
         ffile = st.text_input("Filter by filename:")

@@ -1,5 +1,6 @@
 import ollama
 from typing import List, Dict
+from config import OLLAMA_MODEL
 
 SYSTEM_PROMPT = """
 You are an AI assistant that answers questions using ONLY the provided context.
@@ -50,7 +51,7 @@ def filter_hits(h, m, s, file_contains=None, symbol_contains=None):
 
 def call_llm(context: str, prompt: str):
     response = ollama.chat(
-        model="llama3:latest",
+        model=OLLAMA_MODEL,
         stream=True,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
