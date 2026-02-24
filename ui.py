@@ -30,7 +30,7 @@ def process_single_file(filename, mime, blob):
 # UI
 # ----------------------------------------------------------------------
 def render_ui():
-    st.title("📄 Minimal RAG (AST Python + Multi-file + FAISS)")
+    st.title(f"📄 Minimal RAG")
 
     # Upload section
     uploaded = st.sidebar.file_uploader(
@@ -61,7 +61,13 @@ def render_ui():
 
         st.sidebar.success(f"Done. Total chunks added: {added}")
 
-    # Clear index
+    # List / Clear index
+    st.sidebar.header("Manage Indexes")
+
+    with st.sidebar.expander("Indexed Documents"):
+        for src in list_indexed_sources():
+            st.write(f"• {src}")
+
     if st.sidebar.button("Clear Index"):
         for p in [INDEX_PATH, DOCS_PATH]:
             if os.path.exists(p): os.remove(p)
@@ -82,10 +88,6 @@ def render_ui():
                 count = import_from_zip(uz)
             st.sidebar.success(f"Imported {count} chunks.")
 
-    # Indexed docs list
-    with st.sidebar.expander("Indexed Documents"):
-        for src in list_indexed_sources():
-            st.write(f"• {src}")
 
     # Query panel
     st.header("Ask a Question")
