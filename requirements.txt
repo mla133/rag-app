@@ -1,6 +1,6 @@
-ollama
-chromadb
-sentence-transformers
 streamlit
-pymupdf
-langchain-community
+fastembed
+faiss-cpu
+numpy
+ollama
+pypdf
