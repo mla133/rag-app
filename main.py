@@ -31,6 +31,7 @@ from collections import defaultdict
 # ==========================
 # Embedding model name used by fastembed (384-dim output for bge-small-en-v1.5)
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"  # fastembed model (~384-dim)
+EMBED_PATH  = "../../bge-small-en-v1.5"
 # File paths for FAISS index (vectors) and a pickle file (texts + metadata)
 INDEX_PATH = "./faiss_store.index"
 DOCS_PATH  = "./faiss_docs.pkl"
@@ -39,12 +40,16 @@ CHUNK_SIZE = 400
 CHUNK_OVERLAP = 100
 # How many most-similar passages to retrieve per query
 TOP_K = 5
+# Ollama model used for chat interface
+#OLLAMA_MODEL = "tinyllama:1.1b"
+OLLAMA_MODEL = "llama3:latest"
 
 # ==========================
 # Lightweight Embeddings
 # ==========================
 # fastembed provides compact, no-PyTorch embeddings (greatly reducing size)
 from fastembed import TextEmbedding
+#_embedder = TextEmbedding(model_name=EMBED_MODEL, specific_model_path=EMBED_PATH)
 _embedder = TextEmbedding(model_name=EMBED_MODEL)
 _EMBED_DIM = 384  # bge-small-en-v1.5 output dimension (needed to shape the FAISS index)
 
@@ -389,7 +394,7 @@ def call_llm(context: str, prompt: str):
     Streamed chunks are yielded for real-time display in Streamlit.
     """
     response = ollama.chat(
-        model="tinyllama:1.1b",
+        model=OLLAMA_MODEL,
         stream=True,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
